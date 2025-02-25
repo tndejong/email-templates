@@ -19,6 +19,7 @@ class EmailTemplateThemeResource extends Resource
 {
     protected static ?string $model = EmailTemplateTheme::class;
 
+    protected static bool $isScopedToTenant = false;
 
     public static function shouldRegisterNavigation(): bool
     {

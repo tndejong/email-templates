@@ -34,6 +34,8 @@ class EmailTemplateResource extends Resource
 {
     protected static ?string $model = EmailTemplate::class;
 
+    protected static bool $isScopedToTenant = false;
+    
     public static function shouldRegisterNavigation(): bool
     {
         return EmailTemplatesPlugin::get()->shouldRegisterNavigation();
