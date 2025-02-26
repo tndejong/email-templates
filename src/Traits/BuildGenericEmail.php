@@ -17,8 +17,7 @@ trait BuildGenericEmail
      */
     public function build()
     {
-        $preferredLocale = BezhanSalleh\FilamentLanguageSwitch\LanguageSwitch::make()->getPreferredLocale();
-        $this->emailTemplate = EmailTemplate::findEmailByKey($this->template, $preferredLocale);
+        $this->emailTemplate = EmailTemplate::findEmailByKey($this->template, auth()->user()->language);
 
         if ($this->attachment ?? false) {
             $this->attach(
