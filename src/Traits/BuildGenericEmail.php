@@ -2,7 +2,6 @@
 
 namespace Visualbuilder\EmailTemplates\Traits;
 
-use Illuminate\Support\Facades\App;
 use Visualbuilder\EmailTemplates\Facades\TokenHelper;
 use Visualbuilder\EmailTemplates\Models\EmailTemplate;
 
@@ -18,7 +17,8 @@ trait BuildGenericEmail
      */
     public function build()
     {
-        $this->emailTemplate = EmailTemplate::findEmailByKey($this->template, App::currentLocale());
+        $preferredLocale = BezhanSalleh\FilamentLanguageSwitch\LanguageSwitch::make()->getPreferredLocale();
+        $this->emailTemplate = EmailTemplate::findEmailByKey($this->template, $preferredLocale);
 
         if ($this->attachment ?? false) {
             $this->attach(
