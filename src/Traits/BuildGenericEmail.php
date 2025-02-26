@@ -2,6 +2,7 @@
 
 namespace Visualbuilder\EmailTemplates\Traits;
 
+use Illuminate\Support\Facades\App;
 use Visualbuilder\EmailTemplates\Facades\TokenHelper;
 use Visualbuilder\EmailTemplates\Models\EmailTemplate;
 
@@ -17,7 +18,7 @@ trait BuildGenericEmail
      */
     public function build()
     {
-        $this->emailTemplate = EmailTemplate::findEmailByKey($this->template, auth()->user()->language);
+        $this->emailTemplate = EmailTemplate::findEmailByKey($this->template, App::currentLocale());
 
         if ($this->attachment ?? false) {
             $this->attach(
