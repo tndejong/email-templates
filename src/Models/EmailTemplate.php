@@ -7,13 +7,18 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Spatie\Image\Enums\Fit;
+use Spatie\MediaLibrary\HasMedia;
+use Spatie\MediaLibrary\InteractsWithMedia;
+use Spatie\MediaLibrary\MediaCollections\Models\Media;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 use Visualbuilder\EmailTemplates\Database\Factories\EmailTemplateFactory;
 use Visualbuilder\EmailTemplates\Facades\TokenHelper;
-
 
 /**
  * @property int $id
@@ -21,8 +26,8 @@ use Visualbuilder\EmailTemplates\Facades\TokenHelper;
  * @property array $from
  * @property string $name
  * @property string $view
- * @property object $cc
- * @property object $bcc
+ * @property array $cc
+ * @property array $bcc
  * @property string $subject
  * @property string $title
  * @property string $preheader
@@ -32,9 +37,10 @@ use Visualbuilder\EmailTemplates\Facades\TokenHelper;
  * @property string $updated_at
  * @property string $deleted_at
  */
-class EmailTemplate extends Model
+class EmailTemplate extends Model implements HasMedia
 {
     use HasFactory;
+    use InteractsWithMedia;
     use SoftDeletes;
 
     /**
@@ -51,6 +57,8 @@ class EmailTemplate extends Model
         'content',
         'language',
         'logo',
+        'cc',
+        'bcc'
 
     ];
 
@@ -62,6 +70,8 @@ class EmailTemplate extends Model
         'created_at' => 'datetime:Y-m-d H:i:s',
         'updated_at' => 'datetime:Y-m-d H:i:s',
         'from' => 'array',
+        'cc' => 'array',
+        'bcc' => 'array',
     ];
     /**
      * @var string[]
@@ -75,10 +85,41 @@ class EmailTemplate extends Model
      */
     protected $with = ['theme'];
 
+    public function registerMediaCollections(): void
+    {
+        $this->addMediaCollection('screenshot')
+            ->singleFile()
+            ->acceptsMimeTypes(['image/png', 'image/jpeg', 'image/webp']);
+    }
+
+    public function registerMediaConversions(?Media $media = null): void
+    {
+        $this->addMediaConversion('thumb')
+            ->fit(Fit::Contain, 400, 600)
+            ->nonQueued();
+    }
+
     public function __construct(array $attributes = [])
     {
         parent::__construct($attributes);
         $this->setTableFromConfig();
+        // Include the theme foreign key as a fillable attribute
+        $this->fillable[] = config('filament-email-templates.theme_table_name') . '_id';
+    }
+
+    /**
+     * Remove temporary logo fields before mass assignment.
+     */
+    public function fill(array $attributes)
+    {
+        if (isset($attributes['logo_url'])) {
+            if (($attributes['logo_type'] ?? null) === 'paste_url' && $attributes['logo_url']) {
+                $attributes['logo'] = $attributes['logo_url'];
+            }
+            unset($attributes['logo_url'], $attributes['logo_type']);
+        }
+
+        return parent::fill($attributes);
     }
 
     protected static function boot()
@@ -114,10 +155,92 @@ class EmailTemplate extends Model
         });
     }
 
+    /**
+     * Clear all caches related to this email template.
+     *
+     * This method ensures that when a template is updated, the changes are
+     * immediately visible to users by clearing:
+     * - Redis/cache driver cache for the template model
+     * - Compiled Blade view files
+     * - OPcache (PHP bytecode cache)
+     *
+     * @param string $key The template key
+     * @param string $language The template language
+     * @return void
+     */
     public static function clearEmailTemplateCache($key, $language)
     {
         $cacheKey = "email_by_key_{$key}_{$language}";
+
+        // Clear the actual cached template model
         Cache::forget($cacheKey);
+
+        Artisan::call('optimize:clear');
+
+        // Clear OPcache if available
+        if (function_exists('opcache_reset')) {
+            opcache_reset();
+            Log::info("OPcache cleared");
+        }
+    }
+
+    /**
+     * Delete compiled view files for a specific email template.
+     *
+     * This method physically removes the compiled PHP view files from the
+     * storage/framework/views directory. This is more aggressive than view:clear
+     * and ensures that Blade will recompile the views on the next request.
+     *
+     * @param string $key The template key
+     * @return void
+     */
+    protected static function deleteCompiledViewsForTemplate($key)
+    {
+        try {
+            $viewPath = config('filament-email-templates.template_view_path', 'vb-email-templates::email');
+            $compiledPath = storage_path('framework/views');
+
+            // If the compiled views directory doesn't exist, nothing to delete
+            if (!File::isDirectory($compiledPath)) {
+                return;
+            }
+
+            // Get all compiled view files
+            $files = File::files($compiledPath);
+
+            // Delete compiled files that might contain this template's content
+            // Compiled view filenames are MD5 hashes, so we can't match them exactly
+            // Instead, we look for files that contain the template's view path or key
+            foreach ($files as $file) {
+                $filePath = $file->getPathname();
+
+                // Read the file and check if it contains references to our template
+                // This is a heuristic approach since compiled views include the original path
+                $contents = @file_get_contents($filePath);
+                if ($contents === false) {
+                    continue;
+                }
+
+                // Check if this compiled view references our email template views
+                if (
+                    str_contains($contents, $viewPath) ||
+                    str_contains($contents, 'vb-email-templates') ||
+                    str_contains($contents, $key)
+                ) {
+                    @unlink($filePath);
+                }
+            }
+        } catch (\Exception $e) {
+            // If deletion fails, log but don't throw
+            // The view:clear command should have already cleared the cache
+            \Illuminate\Support\Facades\Log::warning(
+                'Failed to delete compiled views for email template',
+                [
+                    'key' => $key,
+                    'error' => $e->getMessage()
+                ]
+            );
+        }
     }
 
     /**
@@ -182,12 +305,23 @@ class EmailTemplate extends Model
     {
         $models = self::createEmailPreviewData();
 
+        $previewOverrides = config('filament-email-templates.preview_data', []);
+
+        // Apply static overrides: replace ##prefix.attr## before TokenHelper runs
+        $applyOverrides = function (string $content) use ($previewOverrides): string {
+            foreach ($previewOverrides as $tokenPath => $value) {
+                $content = str_replace("##{$tokenPath}##", (string) $value, $content);
+            }
+
+            return $content;
+        };
+
         return [
-            'user' => $models->user,
-            'content' => TokenHelper::replace($this->content ?? '', $models),
-            'subject' => TokenHelper::replace($this->subject ?? '', $models),
-            'preHeaderText' => TokenHelper::replace($this->preheader ?? '', $models),
-            'title' => TokenHelper::replace($this->title ?? '', $models),
+            'user' => $models->user ?? null,
+            'content' => TokenHelper::replace($applyOverrides($this->content ?? ''), $models),
+            'subject' => TokenHelper::replace($applyOverrides($this->subject ?? ''), $models),
+            'preHeaderText' => TokenHelper::replace($applyOverrides($this->preheader ?? ''), $models),
+            'title' => TokenHelper::replace($applyOverrides($this->title ?? ''), $models),
             'theme' => $this->theme->colours,
             'logo' => $this->logo,
         ];
@@ -200,14 +334,26 @@ class EmailTemplate extends Model
     {
         $models = (object)[];
 
-        $userModel = config('filament-email-templates.recipients')[0];
+        $userModel = config('filament-email-templates.recipients')[0] ?? null;
         //Setup some data for previewing email template
-        $models->user = $userModel::first();
+        if ($userModel) {
+            $models->user = $userModel::first();
+        }
         $models->tokenUrl = URL::to('/');
         $models->verificationUrl = URL::to('/');
-        $models->expiresAt = now();
+        $models->expiresAt = now()->addDays(7)->format('d/m/Y H:i');
         /* Not used in preview but need to add something */
         $models->plainText = Str::random(32);
+
+        // Load registered preview models (first record of each)
+        foreach (config('filament-email-templates.preview_models', []) as $prefix => $modelClass) {
+            if (class_exists($modelClass)) {
+                $record = $modelClass::first();
+                if ($record) {
+                    $models->{$prefix} = $record;
+                }
+            }
+        }
 
         return $models;
     }
@@ -237,7 +383,7 @@ class EmailTemplate extends Model
     public function viewPath(): Attribute
     {
         return new Attribute(
-            get: fn() => config('filament-email-templates.template_view_path') . '.' . $this->view
+            get: fn () => config('filament-email-templates.template_view_path') . '.' . $this->view
         );
     }
 

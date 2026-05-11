@@ -13,9 +13,32 @@ class EmailTemplatesPlugin implements Plugin
 {
     use EvaluatesClosures;
 
-    public string $navigationGroup;
+    protected string|Closure|null $navigationGroup = null;
 
     protected bool|Closure|null $navigation = null;
+
+    protected ?Closure $screenshotCaptureCallback = null;
+
+    /**
+     * Configure a callback to capture screenshots of email themes.
+     * The callback receives HTML string and should return ['image' => binary, 'contentType' => 'image/png'] or null.
+     */
+    public function screenshotCapture(Closure $callback): static
+    {
+        $this->screenshotCaptureCallback = $callback;
+
+        return $this;
+    }
+
+    public function getScreenshotCaptureCallback(): ?Closure
+    {
+        return $this->screenshotCaptureCallback;
+    }
+
+    public function hasScreenshotCapture(): bool
+    {
+        return $this->screenshotCaptureCallback !== null;
+    }
 
     public static function make(): static
     {
@@ -44,7 +67,7 @@ class EmailTemplatesPlugin implements Plugin
         return $this->evaluate($this->navigation) ?? config('filament-email-templates.navigation.enabled',true);
     }
 
-    public function navigationGroup(string $navigationGroup): static
+    public function navigationGroup(string|Closure|null $navigationGroup): static
     {
         $this->navigationGroup = $navigationGroup;
         return $this;
@@ -53,7 +76,7 @@ class EmailTemplatesPlugin implements Plugin
 
     public function getNavigationGroup(): ?string
     {
-        return $this->navigationGroup ?? config('filament-email-templates.navigation.templates.group');
+        return $this->evaluate($this->navigationGroup) ?? config('filament-email-templates.navigation.templates.group');
     }
 
     public function register(Panel $panel): void

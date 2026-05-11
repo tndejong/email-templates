@@ -1,4 +1,4 @@
-# Email template editor for Filament 3.0
+# Email Template Editor for Filament
 
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/visualbuilder/email-templates.svg?style=flat-square)](https://packagist.org/packages/visualbuilder/email-templates)
 ![Packagist Downloads](https://img.shields.io/packagist/dt/visualbuilder/email-templates)
@@ -53,11 +53,23 @@ Edit email content in the admin and use tokens to inject model or config content
 ![Email Preview](https://raw.githubusercontent.com/visualbuilder/email-templates/3.x/media/EmailEditor.png)
 
 
+## Version Compatibility
+
+| Package Version | Filament | Laravel | PHP |
+|-----------------|----------|---------|-----|
+| 5.x | 5.x | 11.x, 12.x | 8.2+ |
+| 4.x | 4.x | 11.x | 8.2+ |
+| 3.x | 3.x | 10.x, 11.x | 8.1+ |
+
 ## Installation
 Get the package via composer:
 
 ```bash
-composer require visualbuilder/email-templates
+# For Filament 5.x
+composer require visualbuilder/email-templates:^5.0
+
+# For Filament 4.x
+composer require visualbuilder/email-templates:^4.0
 ```
 
 Running the install command will copy the template views, migrations, seeders and config file to your app.
@@ -96,6 +108,8 @@ Menu Group and sort order can be set in the config
 In the config file ``config/filament-email-templates.php`` navigation can be disabled/enabled
 
 ```php
+use Filament\Pages\Enums\SubNavigationPosition;
+
     /**
      * Admin panel navigation options
      */
@@ -129,9 +143,50 @@ Or you can use a closure to enable navigation only for specific users:
 // ...
         EmailTemplatesPlugin::make()
                 ->enableNavigation(
-                    fn () => auth()->user()->can('view_email_templates') || auth()->user()->can('view_any_email_templates)'),
+                    fn () => auth()->user()->can('view_email_templates') || auth()->user()->can('view_any_email_templates'),
                ),
     ])
+```
+
+### Theme Screenshots
+
+The package supports optional screenshot capture for email template themes. When configured, a "Capture" button appears on the theme list page that generates a preview image of how emails look with that theme's colours. Screenshots are stored via Spatie MediaLibrary on the `EmailTemplateTheme` model.
+
+#### Configuring Screenshot Capture
+
+Provide a `screenshotCapture` closure on the plugin. The closure receives the rendered email HTML string and should return `['image' => binary, 'contentType' => 'image/png']` or `null`.
+
+```php
+// AdminPanelProvider.php
+->plugins([
+    EmailTemplatesPlugin::make()
+        ->screenshotCapture(function (string $html): ?array {
+            // Example using a screenshot service (Browsershot, Puppeteer Lambda, etc.)
+            return app(ScreenshotService::class)->htmlToBase64($html, [
+                'viewport' => 'mobile',
+                'fullPage' => true,
+            ]);
+        }),
+])
+```
+
+When configured, the theme list page will show:
+- A **preview thumbnail** column showing the captured screenshot
+- A **Capture** button on each row to capture/recapture a single theme
+- A **Capture Screenshots** bulk action to capture multiple themes at once
+- A **manual upload** field in the theme edit form
+
+When `screenshotCapture` is not configured, these features are hidden and the package works exactly as before.
+
+#### Screenshot Storage
+
+Screenshots are stored as a `screenshot` media collection (single file) on the `EmailTemplateTheme` model. A `thumb` conversion (400x600, contain) is generated automatically for the list view.
+
+The model implements `Spatie\MediaLibrary\HasMedia`, so you can access screenshots programmatically:
+
+```php
+$theme->getFirstMediaUrl('screenshot');           // Original
+$theme->getFirstMediaUrl('screenshot', 'thumb');  // Thumbnail
 ```
 
 ## Usage
@@ -200,6 +255,12 @@ template.
 
 For reference this is done in the `EmailTemplatesAuthServiceProvider`.
 
+> **Important** Register this provider so the override takes effect.
+> Add `Visualbuilder\EmailTemplates\EmailTemplatesAuthServiceProvider::class`
+> to the `providers` array in `config/app.php` (or within your own
+> `AppServiceProvider`). Without this, Laravel will send its default
+> verification email instead of your customised template.
+
 This can be disabled in the config.
 
 To Enable email verification ensure the User model implements the Laravel MustVerifyEmail contract:-
@@ -209,6 +270,29 @@ class User extends Authenticatable implements MustVerifyEmail
 ```
 
 and include the **verified** middleware in your routes.
+
+If you have a custom registration page and need to manually generate the
+verification URL, you can send the notification like this:
+
+```php
+use Illuminate\Support\Facades\URL;
+
+$notification = new \Filament\Notifications\Auth\VerifyEmail();
+$notification->url = URL::temporarySignedRoute(
+    'filament.actor.auth.email-verification.verify',
+    now()->addMinutes(config('auth.verification.expire', 60)),
+    [
+        'id' => $user->getKey(),
+        'hash' => sha1($user->getEmailForVerification()),
+    ]
+);
+
+$user->notify($notification);
+
+Auth::login($user);
+```
+
+> **Note** The `notify()` call must occur **before** logging in the user.
 
 #### User Request Password Reset
 
@@ -550,8 +634,8 @@ You should also include the filetype.
 
         $data = [
             'content'       => TokenHelper::replace($template->content, $this),
-            'preHeaderText' => TokenHelper::replace($template->preheader, $this),
-            'title'         => TokenHelper::replace($template->title, $this)
+            'preHeaderText' => TokenHelper::replace($template->preheader ?? '', $this),
+            'title'         => TokenHelper::replace($template->title ?? '', $this)
         ];
 
         return $this->from($template->from['email'],$template->from['name'])
